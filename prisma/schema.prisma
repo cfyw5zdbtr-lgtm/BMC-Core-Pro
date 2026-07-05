@@ -1,0 +1,262 @@
+// prisma/schema.prisma
+//
+// Site management tool — schema for personal use across multiple sites.
+// Module 1 (Daily Logs + Photos) is fully fleshed out below.
+// Later modules (Compliance, Tasks, RFIs, Inspections, Budget) are stubbed
+// with enough structure to build against as you get to them — feel free to
+// comment them out until you're ready.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql" // Supabase or Neon
+  url      = env("DATABASE_URL")
+}
+
+// ---------------------------------------------------------------------------
+// CORE
+// ---------------------------------------------------------------------------
+
+model Project {
+  id          String   @id @default(cuid())
+  name        String
+  client      String?
+  address     String?
+  status      ProjectStatus @default(ACTIVE)
+  jobNumber   String?  // e.g. "48000-NZ-048"
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  dailyLogs      DailyLog[]
+  subcontractors ProjectSubcontractor[]
+  tasks          Task[]
+  rfis           RFI[]
+  inspections    Inspection[]
+  budgetLines    BudgetLine[]
+}
+
+enum ProjectStatus {
+  ACTIVE
+  ON_HOLD
+  COMPLETE
+}
+
+// ---------------------------------------------------------------------------
+// MODULE 1: DAILY LOGS + PHOTOS
+// ---------------------------------------------------------------------------
+
+model DailyLog {
+  id            String   @id @default(cuid())
+  project       Project  @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  projectId     String
+
+  date          DateTime @db.Date
+  weather       String?  // e.g. "Fine, 18°C" — keep free text, or split out later
+  tempC         Int?
+  crewOnSite    Int?
+  delaysNoted   Boolean  @default(false)
+  delayNotes    String?
+
+  workCompleted String   @db.Text
+  notes         String?  @db.Text
+
+  createdBy     String?  // your user id / name, once you add auth
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  photos        Photo[]
+  laborEntries  LaborEntry[]
+
+  @@unique([projectId, date]) // one log per project per day — adjust if you want multiple
+  @@index([projectId, date])
+}
+
+// Simple crew/labor tracking within a daily log — optional, easy to skip filling in
+model LaborEntry {
+  id           String   @id @default(cuid())
+  dailyLog     DailyLog @relation(fields: [dailyLogId], references: [id], onDelete: Cascade)
+  dailyLogId   String
+
+  company      String   // subcontractor or own crew
+  trade        String?
+  headcount    Int
+  hoursWorked  Float?
+  notes        String?
+}
+
+model Photo {
+  id           String    @id @default(cuid())
+  url          String    // storage URL (Supabase Storage / S3 / Vercel Blob)
+  thumbnailUrl String?
+  caption      String?
+  takenAt      DateTime?
+  createdAt    DateTime  @default(now())
+
+  // Polymorphic-ish linking — a photo can belong to a daily log OR an inspection.
+  // Simpler alternative: split into DailyLogPhoto / InspectionPhoto if you prefer
+  // strict relations over nullable FKs.
+  dailyLog     DailyLog?    @relation(fields: [dailyLogId], references: [id], onDelete: Cascade)
+  dailyLogId   String?
+  inspection   Inspection?  @relation(fields: [inspectionId], references: [id], onDelete: Cascade)
+  inspectionId String?
+
+  @@index([dailyLogId])
+  @@index([inspectionId])
+}
+
+// ---------------------------------------------------------------------------
+// MODULE 2: SUBCONTRACTOR COMPLIANCE (mirrors your Site Safe register logic)
+// ---------------------------------------------------------------------------
+
+model Subcontractor {
+  id        String   @id @default(cuid())
+  name      String
+  contactName String?
+  email     String?
+  phone     String?
+  createdAt DateTime @default(now())
+
+  projects  ProjectSubcontractor[]
+  documents ComplianceDoc[]
+}
+
+model ProjectSubcontractor {
+  id              String        @id @default(cuid())
+  project         Project       @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  projectId       String
+  subcontractor   Subcontractor @relation(fields: [subcontractorId], references: [id], onDelete: Cascade)
+  subcontractorId String
+  trade           String?
+
+  @@unique([projectId, subcontractorId])
+}
+
+model ComplianceDoc {
+  id              String        @id @default(cuid())
+  subcontractor   Subcontractor @relation(fields: [subcontractorId], references: [id], onDelete: Cascade)
+  subcontractorId String
+
+  docType         DocType
+  fileUrl         String?
+  issuedAt        DateTime?
+  expiresAt       DateTime?
+  status          DocStatus     @default(VALID) // could be computed rather than stored
+
+  createdAt       DateTime      @default(now())
+}
+
+enum DocType {
+  SSSP
+  SITE_SAFE_CARD
+  PUBLIC_LIABILITY_INSURANCE
+  OTHER
+}
+
+enum DocStatus {
+  VALID
+  EXPIRING_SOON
+  EXPIRED
+  MISSING
+}
+
+// ---------------------------------------------------------------------------
+// MODULE 3: SCHEDULING & TASKS
+// ---------------------------------------------------------------------------
+
+model Task {
+  id          String     @id @default(cuid())
+  project     Project    @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  projectId   String
+
+  title       String
+  description String?    @db.Text
+  assignee    String?
+  dueDate     DateTime?
+  status      TaskStatus @default(TODO)
+  createdAt   DateTime   @default(now())
+}
+
+enum TaskStatus {
+  TODO
+  IN_PROGRESS
+  DONE
+  BLOCKED
+}
+
+// ---------------------------------------------------------------------------
+// MODULE 4: RFIs
+// ---------------------------------------------------------------------------
+
+model RFI {
+  id          String    @id @default(cuid())
+  project     Project   @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  projectId   String
+
+  number      Int
+  question    String    @db.Text
+  drawingRef  String?
+  status      RFIStatus @default(OPEN)
+  response    String?   @db.Text
+  raisedAt    DateTime  @default(now())
+  answeredAt  DateTime?
+
+  @@unique([projectId, number])
+}
+
+enum RFIStatus {
+  OPEN
+  ANSWERED
+  CLOSED
+}
+
+// ---------------------------------------------------------------------------
+// MODULE 5: INSPECTIONS (QA / Safety)
+// ---------------------------------------------------------------------------
+
+model Inspection {
+  id          String   @id @default(cuid())
+  project     Project  @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  projectId   String
+
+  templateName String  // e.g. "Pre-pour checklist", "Weekly H&S walk"
+  date         DateTime @db.Date
+  passed       Boolean?
+  notes        String?  @db.Text
+
+  photos       Photo[]
+  items        InspectionItem[]
+}
+
+model InspectionItem {
+  id           String     @id @default(cuid())
+  inspection   Inspection @relation(fields: [inspectionId], references: [id], onDelete: Cascade)
+  inspectionId String
+
+  label        String
+  result       ItemResult @default(PENDING)
+  comment      String?
+}
+
+enum ItemResult {
+  PASS
+  FAIL
+  NA
+  PENDING
+}
+
+// ---------------------------------------------------------------------------
+// MODULE 6: FINANCIALS / BUDGET
+// ---------------------------------------------------------------------------
+
+model BudgetLine {
+  id         String  @id @default(cuid())
+  project    Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  projectId  String
+
+  costCode   String
+  description String?
+  budgeted   Decimal @db.Decimal(12, 2)
+  actual     Decimal @default(0) @db.Decimal(12, 2)
+}
